@@ -115,23 +115,28 @@ Movie library stored on Backblaze B2 with local SSD/HDD cache.
 **Scenario:** Initial library upload (5TB) via local ethernet (1Gbit/s) with 500GB cache.
 
 **Observed behavior (validated via testing):**
-1. Write speed (125MB/s) >> upload speed (5MB/s)
-2. Writes succeed immediately to cache
-3. Cache temporarily exceeds max-size limit during bulk operations
-4. Files with pending uploads are protected from eviction
-5. After uploads complete → LRU eviction brings cache back under limit
-6. **No data loss in normal operation**
+
+**Test 1: Unrestricted disk space**
+- Data: 444MB, Cache limit: 20MB, Available space: unlimited
+- Result: ✅ No data loss
+- Cache temporarily grew beyond 20MB limit
+- Files with pending uploads protected from eviction
+- After uploads complete → LRU eviction brought cache back under limit
+
+**Test 2: Hard disk quota (btrfs qgroup)**
+- Data: 444MB, Cache limit: 20MB, Quota: 50MB
+- Result: ❌ Write failures
+- Cache attempted to grow beyond 20MB as before
+- Hit hard 50MB quota limit
+- rsync reported: "write failed: Input/output error (5)"
+- Some files failed to write completely
 
 **Key findings:**
-- `--vfs-cache-max-size` is a soft target, not a hard limit
-- Cache can grow beyond max-size when files are queued for upload
-- Eviction only occurs AFTER files successfully upload to B2
-- Write operations don't block or fail when cache exceeds limit
-
-**Data loss risks (exceptional cases only):**
-- Disk completely fills (no space for cache growth) → writes may fail
-- Unclean shutdown (crash/SIGKILL) with pending uploads → potential loss
-- Network failures preventing upload completion
+- `--vfs-cache-max-size` is a **soft limit**, not a hard limit
+- Cache grows beyond max-size when files are queued for upload
+- Eviction occurs AFTER files successfully upload to B2
+- When cache hits hard disk limit → write operations fail with I/O errors
+- Hard limits include: filesystem quotas, disk full, partition size
 
 **Time calculation:**
 5TB @ 5MB/s upload = ~12 days continuous upload time.
@@ -141,19 +146,20 @@ Movie library stored on Backblaze B2 with local SSD/HDD cache.
 ### Data Integrity
 
 **Risk areas:**
-- Unclean shutdown with pending uploads (highest risk)
+- Unclean shutdown with pending uploads
 - Process killed during write operations
-- Disk completely full (no space for cache growth)
+- Hard disk limits (quotas, disk full) → write failures
 - Network failures preventing upload completion
 
 **Validated behaviors (via testing):**
-- Normal bulk uploads: No data loss even when exceeding cache size
+- Unrestricted space: No data loss when cache exceeds max-size
+- Hard quota limits: Write failures with I/O errors when cache growth hits limit
 - Cache protects files with pending uploads from eviction
-- Cache can temporarily grow beyond max-size to ensure upload completion
+- Cache can grow beyond max-size during bulk operations
 
 **Mitigations:**
 - Use `--vfs-write-wait` with reasonable timeout
-- Ensure adequate disk space (cache can exceed max-size temporarily)
+- Ensure disk space available beyond max-size for cache growth
 - Implement proper shutdown procedures (SIGTERM, not SIGKILL)
 - Verify uploads complete: `rclone rc vfs/stats` before shutdown
 - Post-upload verification: `rclone check` to confirm data integrity
@@ -246,15 +252,20 @@ Key log patterns:
 ## Production Recommendations
 
 1. **Set max-age very high** (years) - rely on size limits for eviction
-2. **Use dedicated disk** for cache with ample space
+2. **Provide disk space beyond max-size** - cache can temporarily grow during bulk uploads
 3. **Implement graceful shutdown** - always SIGTERM with write-wait; check vfs/stats before unmount
 4. **Monitor cache hit ratio** - optimize cache size based on access patterns
 5. **Periodic verification** - script to check cache vs B2 consistency (`rclone check`)
 6. **Test failure scenarios** - simulate crashes, verify data integrity
 7. **Document recovery procedures** - how to detect and fix incomplete uploads
-8. **Consider write patterns** - bulk uploads work safely; ensure adequate disk space for temporary cache growth
 
 ## Known Issues and Workarounds
+
+### Hard Disk Quota/Limit Issues (VALIDATED)
+- Cache grows beyond max-size during bulk uploads
+- If hits filesystem quota/limit → write failures with I/O errors
+- Tested with btrfs qgroup: 444MB data, 20MB max-size, 50MB quota = I/O errors
+- Ensure available disk space exceeds max-size
 
 ### Cache Rebuild on Remount (Some Reports)
 - Usually caused by permission issues or wrong cache-dir path
