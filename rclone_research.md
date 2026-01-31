@@ -114,17 +114,24 @@ Movie library stored on Backblaze B2 with local SSD/HDD cache.
 
 **Scenario:** Initial library upload (5TB) via local ethernet (1Gbit/s) with 500GB cache.
 
-**Problem:**
+**Observed behavior (validated via testing):**
 1. Write speed (125MB/s) >> upload speed (5MB/s)
-2. Cache fills to 500GB in ~67 minutes
-3. Still have 4.5TB queued for upload
-4. Upload of 500GB takes ~28 hours at 5MB/s
+2. Writes succeed immediately to cache
+3. Cache temporarily exceeds max-size limit during bulk operations
+4. Files with pending uploads are protected from eviction
+5. After uploads complete → LRU eviction brings cache back under limit
+6. **No data loss in normal operation**
 
-**Backpressure behavior:**
-- No direct write throttling in rclone
-- When cache reaches max size → LRU eviction begins
-- Files may be evicted before upload completes → **data loss risk**
-- Write operations may block or fail when cache full
+**Key findings:**
+- `--vfs-cache-max-size` is a soft target, not a hard limit
+- Cache can grow beyond max-size when files are queued for upload
+- Eviction only occurs AFTER files successfully upload to B2
+- Write operations don't block or fail when cache exceeds limit
+
+**Data loss risks (exceptional cases only):**
+- Disk completely fills (no space for cache growth) → writes may fail
+- Unclean shutdown (crash/SIGKILL) with pending uploads → potential loss
+- Network failures preventing upload completion
 
 **Time calculation:**
 5TB @ 5MB/s upload = ~12 days continuous upload time.
@@ -134,16 +141,22 @@ Movie library stored on Backblaze B2 with local SSD/HDD cache.
 ### Data Integrity
 
 **Risk areas:**
-- Unclean shutdown with pending uploads
+- Unclean shutdown with pending uploads (highest risk)
 - Process killed during write operations
-- Disk full during caching
-- Network failures during upload
+- Disk completely full (no space for cache growth)
+- Network failures preventing upload completion
+
+**Validated behaviors (via testing):**
+- Normal bulk uploads: No data loss even when exceeding cache size
+- Cache protects files with pending uploads from eviction
+- Cache can temporarily grow beyond max-size to ensure upload completion
 
 **Mitigations:**
 - Use `--vfs-write-wait` with reasonable timeout
-- Monitor disk space for cache directory
+- Ensure adequate disk space (cache can exceed max-size temporarily)
 - Implement proper shutdown procedures (SIGTERM, not SIGKILL)
-- Consider verification scripts post-upload
+- Verify uploads complete: `rclone rc vfs/stats` before shutdown
+- Post-upload verification: `rclone check` to confirm data integrity
 
 ### Cache Consistency
 
@@ -234,12 +247,12 @@ Key log patterns:
 
 1. **Set max-age very high** (years) - rely on size limits for eviction
 2. **Use dedicated disk** for cache with ample space
-3. **Implement graceful shutdown** - always SIGTERM with write-wait
+3. **Implement graceful shutdown** - always SIGTERM with write-wait; check vfs/stats before unmount
 4. **Monitor cache hit ratio** - optimize cache size based on access patterns
-5. **Periodic verification** - script to check cache vs B2 consistency
+5. **Periodic verification** - script to check cache vs B2 consistency (`rclone check`)
 6. **Test failure scenarios** - simulate crashes, verify data integrity
-7. **Document recovery procedures** - how to detect and fix missing uploads
-8. **Consider write-once pattern** - new files added explicitly, not through mount
+7. **Document recovery procedures** - how to detect and fix incomplete uploads
+8. **Consider write patterns** - bulk uploads work safely; ensure adequate disk space for temporary cache growth
 
 ## Known Issues and Workarounds
 
